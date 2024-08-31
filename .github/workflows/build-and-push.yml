@@ -1,0 +1,144 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_REGION: 'australiaeast'
+  ACR_NAME: 'skilltechregistry'
+  RESOURCE_GROUP_NAME: 'microservices-demo-rg'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  
+    strategy:
+      matrix:
+        service:
+          - src/adservice
+          - src/cartservice/src 
+          - src/checkoutservice
+          - src/currencyservice
+          - src/emailservice
+          - src/frontend
+          - src/loadgenerator
+          - src/paymentservice
+          - src/productcatalogservice
+          - src/recommendationservice
+          - src/shippingservice
+          - src/shoppingassistantservice
+    outputs:
+      images: ${{ steps.set-images-output.outputs.images }} # Output the built images
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: Verify Azure CLI installation
+        run: |
+          az --version
+
+      - name: Log in to Azure
+        uses: azure/login@v1.4.7
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to Azure Container Registry
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build and push Docker image
+        run: |
+          # Adjust the path if your Dockerfile is in a different location
+          DOCKERFILE_PATH=${{ matrix.service }} 
+          if [ ! -f "$DOCKERFILE_PATH/Dockerfile" ]; then
+            DOCKERFILE_PATH=${{ matrix.service }}/src # Check in the 'src' subdirectory
+          fi
+
+          if [ ! -f "$DOCKERFILE_PATH/Dockerfile" ]; then
+            echo "Error: Dockerfile not found in $DOCKERFILE_PATH"
+            exit 1
+          fi
+
+          cd $DOCKERFILE_PATH  # Change to the directory containing the Dockerfile
+
+          # Special handling for cartservice image name
+          if [ "${{ matrix.service }}" == "src/cartservice/src" ]; then
+            IMAGE_NAME=${{ env.ACR_NAME }}.azurecr.io/cartservice
+          else
+            IMAGE_NAME=${{ env.ACR_NAME }}.azurecr.io/$(basename ${{ matrix.service }})
+          fi
+
+          # Check for requirements.txt (Python) or go.mod and go.sum (Go)
+          if [ -f "requirements.txt" ]; then
+            pip install --upgrade pip
+            pip install -r requirements.txt
+          elif [ -f "go.mod" ] && [ -f "go.sum" ]; then
+            go mod download 
+          fi
+
+          docker build -t $IMAGE_NAME:latest .
+          docker push $IMAGE_NAME:latest
+
+      - id: set-images-output 
+        run: echo "images=$(echo ${{ matrix.service }} | sed 's/src\///g' | sed 's/\/src//g')" >> $GITHUB_OUTPUT
+
+      - name: Azure CLI logout
+        run: |
+          az logout
+
+  deploy-to-aks:
+    runs-on: ubuntu-latest
+    needs: build-and-push  # Wait for the build-and-push job to complete
+    env:
+      AZURE_REGION: 'australiaeast'
+      ACR_NAME: 'skilltechregistry'
+      RESOURCE_GROUP_NAME: 'microservices-demo-rg'
+      AKS_CLUSTER_NAME: 'your-aks-cluster-name'  # Replace with your AKS cluster name
+      AKS_NAMESPACE: 'default'                    # Replace if you use a different namespace
+    steps:
+      - name: Checkout code 
+        uses: actions/checkout@v3
+
+      - name: Get built images
+        run: echo "${{ needs.build-and-push.outputs.images }}" 
+
+      - name: Install Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: Verify Azure CLI installation
+        run: |
+          az --version
+
+      - name: Log in to Azure
+        uses: azure/login@v1.4.7
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS Credentials (if needed for private ACR)
+        # Only needed if your ACR is private and requires authentication for AKS to pull images
+        run: |
+          az aks get-credentials --resource-group ${{ env.RESOURCE_GROUP_NAME }} --name ${{ env.AKS_CLUSTER_NAME }}
+
+      - name: Deploy to AKS
+        uses: ./.github/workflows/deploy-to-aks.yml # Use the separate deployment workflow
+        with:
+          images: "${{ needs.build-and-push.outputs.images }}" 
+
+      - name: Azure CLI logout
+        run: |
+          az logout

@@ -1,0 +1,31 @@
+name: Deploy to AKS
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        required: true
+        type: string
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+
+env:
+  AKS_NAMESPACE: 'default' # Replace if you use a different namespace
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy each image
+        run: |
+          for service in ${{ inputs.images }}; do
+            echo "Deploying $service"
+            kubectl apply -f kubernetes-manifests/$service.yaml 
+            kubectl set image deployment/$service server=$service:latest --namespace ${{ env.AKS_NAMESPACE }}
+            echo "Deployed $service"
+          done
